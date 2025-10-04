@@ -1,5 +1,53 @@
 import { WS_BASE_URL, API_TOKEN } from '../../config/env';
-import type { LiveTranscribeMessage } from '../../types/api';
+import type { LiveTranscribeMessage, LiveTranscribeMessageType } from '../../types/api';
+
+type ServerMessage = {
+  type?: string;
+  text?: string;
+  session_id?: string;
+  sessionId?: string;
+  final_text?: string;
+  download_url?: string;
+  downloadUrl?: string;
+  segments?: Array<Record<string, unknown>>;
+  language?: string;
+  [key: string]: unknown;
+};
+
+const VALID_TYPES: Set<LiveTranscribeMessageType> = new Set([
+  'session_start',
+  'session_end',
+  'partial',
+  'final',
+  'translation',
+  'error',
+  'info',
+]);
+
+const normalizeServerMessage = (
+  data: ServerMessage,
+  fallbackSessionId?: string,
+): LiveTranscribeMessage => {
+  const rawType = typeof data.type === 'string' ? (data.type as string) : 'info';
+  const normalizedType = VALID_TYPES.has(rawType as LiveTranscribeMessageType)
+    ? (rawType as LiveTranscribeMessageType)
+    : 'info';
+
+  const sessionId = (data.sessionId ?? data.session_id ?? fallbackSessionId) as string | undefined;
+  const text = (data.text ?? data.final_text) as string | undefined;
+  const downloadUrl = (data.downloadUrl ?? data.download_url) as string | undefined;
+  const segments = Array.isArray(data.segments) ? (data.segments as Array<Record<string, unknown>>) : undefined;
+
+  return {
+    type: normalizedType,
+    text,
+    language: typeof data.language === 'string' ? data.language : undefined,
+    sessionId,
+    downloadUrl,
+    segments,
+    raw: data,
+  };
+};
 
 type MessageHandler = (msg: LiveTranscribeMessage) => void;
 type ErrorHandler = (err: Error) => void;
@@ -19,7 +67,9 @@ export class LiveTranscribeClient {
 
   connect(language?: string) {
     if (language) this.language = language;
-    const url = `${WS_BASE_URL}/live-transcribe?lang=${encodeURIComponent(this.language)}${API_TOKEN ? `&token=${encodeURIComponent(API_TOKEN)}` : ''}`;
+    this.sessionId = undefined;
+    const tokenQuery = API_TOKEN ? `&token=${encodeURIComponent(API_TOKEN)}` : '';
+    const url = `${WS_BASE_URL}/live-transcribe?lang=${encodeURIComponent(this.language)}${tokenQuery}`;
     this.ws = new WebSocket(url);
 
     this.ws.onopen = () => {
@@ -29,12 +79,18 @@ export class LiveTranscribeClient {
 
     this.ws.onmessage = (ev) => {
       try {
-        const data = JSON.parse(ev.data) as LiveTranscribeMessage;
-        if (data.sessionId) this.sessionId = data.sessionId;
-        this.onMessage?.(data);
+        const parsed = JSON.parse(ev.data) as ServerMessage;
+        const normalized = normalizeServerMessage(parsed, this.sessionId);
+        if (normalized.sessionId) this.sessionId = normalized.sessionId;
+        this.onMessage?.(normalized);
       } catch {
         // fallback: treat as text message
-        this.onMessage?.({ type: 'partial', text: String(ev.data), language: this.language, sessionId: this.sessionId });
+        this.onMessage?.({
+          type: 'partial',
+          text: String(ev.data),
+          language: this.language,
+          sessionId: this.sessionId,
+        });
       }
     };
 
@@ -45,12 +101,14 @@ export class LiveTranscribeClient {
 
     this.ws.onclose = () => {
       this.ws = undefined;
+      this.sessionId = undefined;
     };
   }
 
   disconnect() {
     if (this.ws && this.ws.readyState <= 1) this.ws.close();
     this.ws = undefined;
+    this.sessionId = undefined;
   }
 
   sendAudioChunk(chunk: ArrayBuffer | Blob) {
@@ -62,12 +120,17 @@ export class LiveTranscribeClient {
     this.ws.send(chunk);
   }
 
-  sendJSON(payload: LiveTranscribeMessage) {
+  sendJSON(payload: Record<string, unknown>) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     this.ws.send(JSON.stringify(payload));
   }
 
   getSessionId() {
     return this.sessionId;
+  }
+
+  requestStop() {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    this.ws.send(JSON.stringify({ text: 'stop' }));
   }
 }

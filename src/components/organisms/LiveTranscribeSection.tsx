@@ -17,48 +17,77 @@ const LiveTranscribeSection: React.FC<{ className?: string }> = ({ className = '
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const clientRef = useRef<LiveTranscribeClient | null>(null);
   const sessionRef = useRef<string | undefined>(undefined);
+  const disconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     // (Re)initialize client when language changes
     clientRef.current?.disconnect();
+    sessionRef.current = undefined;
+    setText('');
     const client = new LiveTranscribeClient({
       language,
       onMessage: (msg) => {
-        // Manage session selection and creation on first message
+        if (disconnectTimeoutRef.current) {
+          clearTimeout(disconnectTimeoutRef.current);
+          disconnectTimeoutRef.current = null;
+        }
+
+        if (msg.type === 'error' && msg.text) {
+          setError(msg.text);
+          return;
+        }
+
+        setIsConnecting(false);
+
         if (msg.sessionId && sessionRef.current !== msg.sessionId) {
+          sessionRef.current = msg.sessionId;
           dispatch({ type: 'add_session', payload: { id: msg.sessionId, language, createdAt: Date.now() } });
           dispatch({ type: 'set_current', payload: msg.sessionId });
-          sessionRef.current = msg.sessionId;
+          setText('');
         }
 
-        // Update local live text
-        if ((msg.type === 'final' || msg.type === 'partial') && msg.text) {
-          setText((prev) => msg.type === 'final' ? `${prev}\n${msg.text}` : `${msg.text}`);
+        if (msg.type === 'session_end' && msg.text) {
+          setText(msg.text);
+        } else if (msg.type === 'final' && msg.text) {
+          setText((prev) => (prev ? `${prev}\n${msg.text}` : msg.text));
+        } else if (msg.type === 'partial' && msg.text) {
+          setText(msg.text);
         }
 
-        // Persist transcript updates only when both text and sessionId exist
-        if (msg.text && msg.sessionId) {
+        if ((msg.type === 'final' || msg.type === 'session_end') && msg.text && msg.sessionId) {
           dispatch({ type: 'update_transcript', payload: { id: msg.sessionId, transcript: msg.text } });
         }
       },
       onError: (err) => setError(err.message),
-    });
-    clientRef.current = client;
-    return () => {
-      clientRef.current?.disconnect();
-    };
-  }, [language, dispatch]);
+      });
+      clientRef.current = client;
+      return () => {
+        clientRef.current?.disconnect();
+        if (disconnectTimeoutRef.current) {
+          clearTimeout(disconnectTimeoutRef.current);
+          disconnectTimeoutRef.current = null;
+        }
+      };
+    }, [language, dispatch]);
 
   useEffect(() => {
     return () => {
       clientRef.current?.disconnect();
       mediaRecorderRef.current?.stop();
+      if (disconnectTimeoutRef.current) {
+        clearTimeout(disconnectTimeoutRef.current);
+        disconnectTimeoutRef.current = null;
+      }
     };
   }, []);
 
   const startRecording = async () => {
     setError(null);
     setIsConnecting(true);
+    if (disconnectTimeoutRef.current) {
+      clearTimeout(disconnectTimeoutRef.current);
+      disconnectTimeoutRef.current = null;
+    }
     try {
       clientRef.current?.connect(language);
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -98,7 +127,10 @@ const LiveTranscribeSection: React.FC<{ className?: string }> = ({ className = '
 
   const stopRecording = () => {
     mediaRecorderRef.current?.stop();
-    clientRef.current?.disconnect();
+    clientRef.current?.requestStop();
+    disconnectTimeoutRef.current = setTimeout(() => {
+      clientRef.current?.disconnect();
+    }, 2000);
     setIsRecording(false);
   };
 

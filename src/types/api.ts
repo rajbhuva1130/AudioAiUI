@@ -7,11 +7,23 @@ export interface FileTranscribeResponse {
   status?: 'processing' | 'done' | 'error';
 }
 
+export type LiveTranscribeMessageType =
+  | 'session_start'
+  | 'session_end'
+  | 'partial'
+  | 'final'
+  | 'translation'
+  | 'error'
+  | 'info';
+
 export interface LiveTranscribeMessage {
-  type: 'partial' | 'final' | 'translation' | 'error' | 'info';
+  type: LiveTranscribeMessageType;
   text?: string;
   language?: LanguageCode;
   sessionId?: string;
+  segments?: Array<Record<string, unknown>>;
+  downloadUrl?: string;
+  raw?: unknown;
 }
 
 export type DownloadFormat = 'txt' | 'srt' | 'json';
